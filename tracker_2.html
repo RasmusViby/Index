@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tracker</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0f1419; }
+  * { box-sizing: border-box; }
+</style>
+<!-- React + ReactDOM (CDN) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Babel standalone lets this single file use JSX with no build step -->
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+// ─────────────────────────────────────────────────────────────
+// Storage: localStorage, scoped to this browser only.
+// Same get/set interface as the cloud version so the rest of the
+// app code below is unchanged.
+// ─────────────────────────────────────────────────────────────
+const STORAGE_PREFIX = "tracker:";
+const store = {
+  async get(key, fallback) {
+    try {
+      const raw = window.localStorage.getItem(STORAGE_PREFIX + key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch { return fallback; }
+  },
+  async set(key, value) {
+    try { window.localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value)); }
+    catch (e) { console.error("save failed", e); }
+  },
+};
+
+// ─────────────────────────────────────────────────────────────
+// Defaults — editable in-app
+// ─────────────────────────────────────────────────────────────
+const DAY_TYPES = {
+  rest:  { label: "Rest",      kcal: 1450 },
+  easy:  { label: "Easy",      kcal: 1800 },
+  hard:  { label: "Hard",      kcal: 2100 },
+  vhard: { label: "Very hard", kcal: 2300 },
+};
+const PROTEIN_FLOOR = 140;
+const WEIGHT_BAND = { low: 90.0, high: 90.5 };
+const VISIBLE_CAP = 10;
+
+const mkId = (name) => name.toLowerCase().replace(/[^a-z]/g, "") + Math.random().toString(36).slice(2, 6);
+const seed = (name, kcal, protein, carb) => ({ id: mkId(name), name, kcal, protein, carb, uses: 0 });
+
+const DEFAULT_MEALS = {
+  breakfast: [
+    seed("Flat white ×2", 160, 10, false), seed("Eggs ×3", 210, 18, false),
+    seed("Greek yogurt (fist)", 130, 12, false), seed("Sourdough (slice)", 120, 4, true),
+    seed("Banana", 105, 1, true), seed("Smoked salmon (palm)", 120, 18, false),
+    seed("Honey (tbsp)", 65, 0, true), seed("Oats (fist)", 150, 5, true),
+  ],
+  lunch: [
+    seed("Chicken breast (palm)", 165, 31, false), seed("Chicken thigh (palm)", 210, 26, false),
+    seed("Cottage cheese (fist)", 160, 20, false), seed("Rice (fist)", 205, 4, true),
+    seed("Potatoes (fist)", 130, 3, true), seed("Rye bread (slice)", 90, 3, true),
+    seed("Olive oil (tbsp)", 120, 0, false), seed("Mixed veg (fist)", 40, 2, false),
+    seed("Apple", 95, 0, true),
+  ],
+  dinner: [
+    seed("Minced beef (palm)", 215, 22, false), seed("Minced pork (palm)", 230, 21, false),
+    seed("Chicken breast (palm)", 165, 31, false), seed("Pasta (fist)", 220, 8, true),
+    seed("Rice (fist)", 205, 4, true), seed("Potatoes (fist)", 130, 3, true),
+    seed("Salmon fillet (palm)", 230, 25, false), seed("Mixed veg (fist)", 40, 2, false),
+    seed("Wholegrain bread (slice)", 110, 4, true),
+  ],
+  snack: [
+    seed("Greek yogurt (fist)", 130, 12, false), seed("Almonds (tbsp)", 100, 4, false),
+    seed("Banana", 105, 1, true), seed("Orange", 62, 1, true),
+    seed("Cottage cheese (fist)", 160, 20, false), seed("Gel", 90, 0, true),
+    seed("Vine gums (handful)", 130, 1, true),
+  ],
+};
+
+const MEAL_ORDER = ["breakfast", "lunch", "dinner", "snack"];
+const MEAL_LABEL = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner", snack: "Snack" };
+const SESSION_TYPES = ["Rest", "Endurance", "Sweet spot", "Threshold", "VO2 max", "Recovery", "Race", "Strength"];
+const todayKey = () => new Date().toISOString().slice(0, 10);
+
+const C = {
+  bg: "#0f1419", panel: "#1a212b", panel2: "#222c38", line: "#2e3a48",
+  text: "#e6edf3", dim: "#8b98a5", accent: "#38d9c8", amber: "#f0a848",
+  red: "#e5647d", good: "#5fd68a",
+};
+
+function App() {
+  const [tab, setTab] = useState("today");
+  const [loaded, setLoaded] = useState(false);
+  const [meals, setMeals] = useState(DEFAULT_MEALS);
+  const [targets, setTargets] = useState(DAY_TYPES);
+  const [proteinFloor, setProteinFloor] = useState(PROTEIN_FLOOR);
+  const [band, setBand] = useState(WEIGHT_BAND);
+  const [log, setLog] = useState({});
+
+  useEffect(() => {
+    (async () => {
+      setMeals(await store.get("meals", DEFAULT_MEALS));
+      setTargets(await store.get("targets", DAY_TYPES));
+      setProteinFloor(await store.get("proteinFloor", PROTEIN_FLOOR));
+      setBand(await store.get("band", WEIGHT_BAND));
+      setLog(await store.get("log", {}));
+      setLoaded(true);
+    })();
+  }, []);
+
+  const saveMeals = (m) => { setMeals(m); store.set("meals", m); };
+  const saveTargets = (t) => { setTargets(t); store.set("targets", t); };
+  const saveFloor = (f) => { setProteinFloor(f); store.set("proteinFloor", f); };
+  const saveBand = (b) => { setBand(b); store.set("band", b); };
+  const saveLog = (l) => { setLog(l); store.set("log", l); };
+
+  const day = log[todayKey()] || { dayType: "easy", tss: "", sessionType: "", weight: "", bodyFat: "", picks: {} };
+  const updateDay = useCallback((patch) => {
+    saveLog({ ...log, [todayKey()]: { ...day, ...patch } });
+  }, [log, day]);
+
+  const bumpUse = (meal, foodId) => {
+    const list = (meals[meal] || []).map((f) =>
+      f.id === foodId ? { ...f, uses: (f.uses || 0) + 1 } : f);
+    saveMeals({ ...meals, [meal]: list });
+  };
+
+  if (!loaded) {
+    return <div style={{ background: C.bg, color: C.dim, minHeight: "100vh",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontFamily: "ui-sans-serif, system-ui" }}>Loading your data…</div>;
+  }
+
+  return (
+    <div style={{ background: C.bg, color: C.text, minHeight: "100vh",
+      fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif",
+      maxWidth: 480, margin: "0 auto", paddingBottom: 80 }}>
+      <Header tab={tab} />
+      <div style={{ padding: "0 16px" }}>
+        {tab === "today" && (
+          <Today day={day} meals={meals} targets={targets} proteinFloor={proteinFloor}
+            band={band} updateDay={updateDay} saveMeals={saveMeals} bumpUse={bumpUse} />
+        )}
+        {tab === "trend" && <Trend log={log} band={band} />}
+        {tab === "settings" && (
+          <Settings meals={meals} saveMeals={saveMeals} targets={targets} saveTargets={saveTargets}
+            proteinFloor={proteinFloor} saveFloor={saveFloor} band={band} saveBand={saveBand} log={log} />
+        )}
+      </div>
+      <TabBar tab={tab} setTab={setTab} />
+    </div>
+  );
+}
+
+function Header({ tab }) {
+  const title = { today: "Today", trend: "Weight trend", settings: "Settings" }[tab];
+  const d = new Date().toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  return (
+    <div style={{ padding: "20px 16px 8px" }}>
+      <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: C.accent }}>
+        {tab === "today" ? d : "Tracker"}
+      </div>
+      <h1 style={{ margin: "2px 0 0", fontSize: 28, fontWeight: 700, letterSpacing: -0.5 }}>{title}</h1>
+    </div>
+  );
+}
+
+function totals(day, meals) {
+  let kcal = 0, protein = 0;
+  const picks = day.picks || {};
+  const carbByMeal = {};
+  for (const meal of MEAL_ORDER) {
+    const list = picks[meal] || [];
+    let mealHasCarb = false, mealHasFood = false;
+    for (const { foodId, n } of list) {
+      const food = (meals[meal] || []).find((f) => f.id === foodId);
+      if (!food) continue;
+      kcal += food.kcal * n; protein += food.protein * n;
+      mealHasFood = true; if (food.carb) mealHasCarb = true;
+    }
+    carbByMeal[meal] = { hasCarb: mealHasCarb, hasFood: mealHasFood };
+  }
+  return { kcal, protein, carbByMeal };
+}
+
+function visibleFoods(meal, meals, picksForMeal) {
+  const all = meals[meal] || [];
+  const pickedIds = new Set((picksForMeal || []).map((p) => p.foodId));
+  const sorted = [...all].sort((a, b) => (b.uses || 0) - (a.uses || 0));
+  const top = sorted.slice(0, VISIBLE_CAP);
+  const topIds = new Set(top.map((f) => f.id));
+  const extras = all.filter((f) => pickedIds.has(f.id) && !topIds.has(f.id));
+  return [...top, ...extras];
+}
+
+function Today({ day, meals, targets, proteinFloor, band, updateDay, saveMeals, bumpUse }) {
+  const { kcal, protein, carbByMeal } = totals(day, meals);
+  const target = targets[day.dayType]?.kcal || 0;
+  const remaining = target - kcal;
+  const [addForMeal, setAddForMeal] = useState(null);
+  const [draft, setDraft] = useState({ name: "", kcal: "", protein: "", carb: false });
+
+  const setCount = (meal, foodId, delta) => {
+    const picks = { ...(day.picks || {}) };
+    const list = [...(picks[meal] || [])];
+    const i = list.findIndex((p) => p.foodId === foodId);
+    if (i >= 0) {
+      const n = list[i].n + delta;
+      if (n <= 0) list.splice(i, 1); else list[i] = { ...list[i], n };
+    } else if (delta > 0) list.push({ foodId, n: 1 });
+    picks[meal] = list;
+    updateDay({ picks });
+    if (delta > 0) bumpUse(meal, foodId);
+  };
+  const countFor = (meal, foodId) =>
+    ((day.picks || {})[meal] || []).find((p) => p.foodId === foodId)?.n || 0;
+
+  const submitNewFood = (meal) => {
+    const name = draft.name.trim();
+    if (!name) return;
+    const food = { id: mkId(name), name,
+      kcal: parseInt(draft.kcal) || 0, protein: parseInt(draft.protein) || 0,
+      carb: !!draft.carb, uses: 1 };
+    saveMeals({ ...meals, [meal]: [...(meals[meal] || []), food] });
+    const picks = { ...(day.picks || {}) };
+    picks[meal] = [...(picks[meal] || []), { foodId: food.id, n: 1 }];
+    updateDay({ picks });
+    setDraft({ name: "", kcal: "", protein: "", carb: false });
+    setAddForMeal(null);
+  };
+
+  const lunchGap = carbByMeal.lunch?.hasFood && !carbByMeal.lunch?.hasCarb;
+  const w = parseFloat(day.weight);
+
+  return (
+    <>
+      <Card>
+        <Label>Morning body metrics</Label>
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <MiniInput label="Weight (kg)" value={day.weight}
+            onChange={(v) => updateDay({ weight: v })} placeholder="—" />
+          <MiniInput label="Body fat %" value={day.bodyFat}
+            onChange={(v) => updateDay({ bodyFat: v })} placeholder="—" />
+        </div>
+        {day.weight && !isNaN(w) && (
+          <div style={{ marginTop: 8, fontSize: 12,
+            color: w <= band.high && w >= band.low ? C.good : C.amber }}>
+            {w > band.high ? `${(w - band.high).toFixed(1)} kg above band (${band.low}–${band.high})`
+              : w < band.low ? `${(band.low - w).toFixed(1)} kg below band`
+              : `In target band ${band.low}–${band.high}`}
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <Label>Training day</Label>
+        <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+          {Object.entries(targets).map(([k, v]) => (
+            <button key={k} onClick={() => updateDay({ dayType: k })}
+              style={{ flex: 1, padding: "10px 4px", borderRadius: 10, cursor: "pointer",
+                border: `1px solid ${day.dayType === k ? C.accent : C.line}`,
+                background: day.dayType === k ? "rgba(56,217,200,0.12)" : "transparent",
+                color: day.dayType === k ? C.accent : C.dim, fontSize: 12, fontWeight: 600 }}>
+              {v.label}<br /><span style={{ fontSize: 10, opacity: 0.8 }}>{v.kcal}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <div style={{ width: 90 }}>
+            <MiniInput label="TSS" value={day.tss} onChange={(v) => updateDay({ tss: v })} placeholder="—" />
+          </div>
+        </div>
+        <Label style={{ marginTop: 12 }}>Session</Label>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+          {SESSION_TYPES.map((s) => (
+            <button key={s} onClick={() => updateDay({ sessionType: day.sessionType === s ? "" : s })}
+              style={{ padding: "6px 12px", borderRadius: 16, cursor: "pointer",
+                border: `1px solid ${day.sessionType === s ? C.accent : C.line}`,
+                background: day.sessionType === s ? "rgba(56,217,200,0.14)" : "transparent",
+                color: day.sessionType === s ? C.accent : C.dim, fontSize: 12, fontWeight: 600 }}>
+              {s}
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <div>
+            <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1 }}>{kcal}</div>
+            <Label>of {target} kcal</Label>
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: remaining < 0 ? C.red : C.good }}>
+            {remaining >= 0 ? `${remaining} left` : `${-remaining} over`}
+          </div>
+        </div>
+        <Bar value={kcal} max={target} color={remaining < 0 ? C.red : C.accent} />
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 14 }}>
+          <Label>Protein {protein}g</Label><Label>floor {proteinFloor}g</Label>
+        </div>
+        <Bar value={protein} max={proteinFloor} color={protein >= proteinFloor ? C.good : C.amber} />
+      </Card>
+
+      {MEAL_ORDER.map((meal) => {
+        const foods = visibleFoods(meal, meals, (day.picks || {})[meal]);
+        return (
+          <Card key={meal}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <Label>{MEAL_LABEL[meal]}</Label>
+              {meal === "lunch" && lunchGap && (
+                <span style={{ fontSize: 11, color: C.amber, fontWeight: 600 }}>⚠ no carbs yet</span>
+              )}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
+              {foods.map((food) => {
+                const n = countFor(meal, food.id);
+                return (
+                  <div key={food.id} style={{ display: "flex", alignItems: "stretch",
+                    borderRadius: 20, overflow: "hidden",
+                    border: `1px solid ${n > 0 ? C.accent : C.line}`,
+                    background: n > 0 ? "rgba(56,217,200,0.14)" : C.panel2 }}>
+                    {n > 0 && (
+                      <button onClick={() => setCount(meal, food.id, -1)} style={stepBtn}>−</button>
+                    )}
+                    <button onClick={() => setCount(meal, food.id, +1)}
+                      style={{ padding: "8px 12px", background: "transparent", border: "none",
+                        cursor: "pointer", textAlign: "left", color: n > 0 ? C.text : C.dim }}>
+                      <span style={{ fontSize: 13, fontWeight: 600 }}>{food.name}</span>
+                      {food.carb && <span style={{ color: C.accent, marginLeft: 4, fontSize: 11 }}>◆</span>}
+                      {n > 0 && <span style={{ marginLeft: 6, fontSize: 13, fontWeight: 700, color: C.accent }}>×{n}</span>}
+                      <span style={{ display: "block", fontSize: 10, color: C.dim, marginTop: 1 }}>
+                        {food.kcal} kcal · {food.protein}p
+                      </span>
+                    </button>
+                  </div>
+                );
+              })}
+              <button onClick={() => {
+                  setAddForMeal(addForMeal === meal ? null : meal);
+                  setDraft({ name: "", kcal: "", protein: "", carb: false });
+                }}
+                style={{ padding: "8px 14px", borderRadius: 20, cursor: "pointer",
+                  border: `1px dashed ${C.accent}`, background: "transparent",
+                  color: C.accent, fontSize: 13, fontWeight: 600 }}>
+                {addForMeal === meal ? "× cancel" : "+ add"}</button>
+            </div>
+
+            {addForMeal === meal && (
+              <div style={{ marginTop: 10, padding: 12, background: C.panel2,
+                borderRadius: 12, border: `1px solid ${C.line}` }}>
+                <input autoFocus value={draft.name}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                  placeholder="Food name + portion (e.g. Lentils (fist))"
+                  style={{ width: "100%", boxSizing: "border-box", background: C.panel,
+                    border: `1px solid ${C.line}`, borderRadius: 8, color: C.text,
+                    padding: "8px 10px", fontSize: 14 }} />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <input value={draft.kcal} inputMode="numeric"
+                    onChange={(e) => setDraft({ ...draft, kcal: e.target.value })}
+                    placeholder="kcal"
+                    style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: C.panel,
+                      border: `1px solid ${C.line}`, borderRadius: 8, color: C.text,
+                      padding: "8px 10px", fontSize: 14 }} />
+                  <input value={draft.protein} inputMode="numeric"
+                    onChange={(e) => setDraft({ ...draft, protein: e.target.value })}
+                    placeholder="protein g"
+                    style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: C.panel,
+                      border: `1px solid ${C.line}`, borderRadius: 8, color: C.text,
+                      padding: "8px 10px", fontSize: 14 }} />
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                  <button onClick={() => setDraft({ ...draft, carb: !draft.carb })}
+                    style={{ padding: "6px 12px", borderRadius: 8, cursor: "pointer",
+                      border: `1px solid ${draft.carb ? C.accent : C.line}`,
+                      background: draft.carb ? "rgba(56,217,200,0.14)" : "transparent",
+                      color: draft.carb ? C.accent : C.dim, fontSize: 12, fontWeight: 600 }}>
+                    {draft.carb ? "◆ carb source" : "not a carb"}
+                  </button>
+                  <button onClick={() => submitNewFood(meal)} disabled={!draft.name.trim()}
+                    style={{ marginLeft: "auto", padding: "8px 16px", borderRadius: 8,
+                      border: "none", background: C.accent, color: C.bg,
+                      fontSize: 13, fontWeight: 700,
+                      cursor: draft.name.trim() ? "pointer" : "default",
+                      opacity: draft.name.trim() ? 1 : 0.5 }}>
+                    Add & log
+                  </button>
+                </div>
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: C.dim, marginTop: 8 }}>
+              Tap to add · − to remove · ◆ = carb · frequent foods rise, rare ones move to Settings
+            </div>
+          </Card>
+        );
+      })}
+    </>
+  );
+}
+
+function Trend({ log, band }) {
+  const entries = Object.entries(log)
+    .filter(([, d]) => d.weight && !isNaN(parseFloat(d.weight)))
+    .map(([date, d]) => ({ date, w: parseFloat(d.weight) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (entries.length === 0)
+    return <Card><div style={{ color: C.dim, padding: "20px 0", textAlign: "center" }}>
+      Log your morning weight to start the trend.</div></Card>;
+
+  const ws = entries.map((e) => e.w);
+  const lo = Math.min(...ws, band.low) - 0.5, hi = Math.max(...ws, band.high) + 0.5;
+  const W = 440, H = 220, pad = 8;
+  const x = (i) => pad + (i / Math.max(1, entries.length - 1)) * (W - 2 * pad);
+  const y = (val) => H - pad - ((val - lo) / (hi - lo)) * (H - 2 * pad);
+  const bandTop = y(band.high), bandBot = y(band.low);
+  const path = entries.map((e, i) => `${i === 0 ? "M" : "L"}${x(i)},${y(e.w)}`).join(" ");
+  const latest = entries[entries.length - 1];
+  const inBand = latest.w >= band.low && latest.w <= band.high;
+
+  const bfEntries = Object.entries(log)
+    .filter(([, d]) => d.bodyFat && !isNaN(parseFloat(d.bodyFat)))
+    .map(([date, d]) => ({ date, bf: parseFloat(d.bodyFat) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  return (
+    <>
+      <Card>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <div>
+            <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1 }}>{latest.w.toFixed(1)}</div>
+            <Label>latest · target {band.low}–{band.high} kg</Label>
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: inBand ? C.good : C.amber }}>
+            {inBand ? "in band" : latest.w > band.high
+              ? `${(latest.w - band.high).toFixed(1)} above` : `${(band.low - latest.w).toFixed(1)} below`}
+          </div>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", marginTop: 12 }}>
+          <rect x={0} y={bandTop} width={W} height={Math.max(0, bandBot - bandTop)} fill="rgba(95,214,138,0.14)" />
+          <line x1={0} y1={bandTop} x2={W} y2={bandTop} stroke={C.good} strokeWidth={1} strokeDasharray="4 4" />
+          <line x1={0} y1={bandBot} x2={W} y2={bandBot} stroke={C.good} strokeWidth={1} strokeDasharray="4 4" />
+          <path d={path} fill="none" stroke={C.accent} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+          {entries.map((e, i) => <circle key={i} cx={x(i)} cy={y(e.w)} r={3} fill={C.accent} />)}
+        </svg>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.dim }}>
+          <span>{entries[0].date.slice(5)}</span><span>{latest.date.slice(5)}</span>
+        </div>
+      </Card>
+
+      {bfEntries.length >= 1 && (() => {
+        const bfs = bfEntries.map((e) => e.bf);
+        const blo = Math.min(...bfs) - 0.5, bhi = Math.max(...bfs) + 0.5;
+        const range = bhi - blo || 1;
+        const bx = (i) => pad + (i / Math.max(1, bfEntries.length - 1)) * (W - 2 * pad);
+        const by = (val) => H - pad - ((val - blo) / range) * (H - 2 * pad);
+        const bpath = bfEntries.map((e, i) => `${i === 0 ? "M" : "L"}${bx(i)},${by(e.bf)}`).join(" ");
+        const bfLatest = bfEntries[bfEntries.length - 1];
+        const bfFirst = bfEntries[0];
+        const delta = bfLatest.bf - bfFirst.bf;
+        return (
+          <Card>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <div>
+                <div style={{ fontSize: 34, fontWeight: 700, lineHeight: 1 }}>{bfLatest.bf.toFixed(1)}%</div>
+                <Label>latest body fat</Label>
+              </div>
+              {bfEntries.length >= 2 && (
+                <div style={{ fontSize: 14, fontWeight: 700, color: delta <= 0 ? C.good : C.amber }}>
+                  {delta <= 0 ? "▼" : "▲"} {Math.abs(delta).toFixed(1)} pts
+                </div>
+              )}
+            </div>
+            {bfEntries.length >= 2 ? (
+              <>
+                <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", marginTop: 12 }}>
+                  <path d={bpath} fill="none" stroke={C.amber} strokeWidth={2.5}
+                    strokeLinejoin="round" strokeLinecap="round" />
+                  {bfEntries.map((e, i) => <circle key={i} cx={bx(i)} cy={by(e.bf)} r={3} fill={C.amber} />)}
+                </svg>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: C.dim }}>
+                  <span>{bfFirst.date.slice(5)}</span><span>{bfLatest.date.slice(5)}</span>
+                </div>
+              </>
+            ) : (
+              <div style={{ color: C.dim, fontSize: 12, marginTop: 10 }}>
+                Log body fat on another day to see the trend line.
+              </div>
+            )}
+          </Card>
+        );
+      })()}
+
+      <Card>
+        <Label>Recent entries</Label>
+        <div style={{ marginTop: 8 }}>
+          {[...entries].reverse().slice(0, 10).map((e) => (
+            <div key={e.date} style={{ display: "flex", justifyContent: "space-between",
+              padding: "6px 0", borderBottom: `1px solid ${C.line}`, fontSize: 13 }}>
+              <span style={{ color: C.dim }}>{e.date}</span>
+              <span style={{ fontWeight: 600 }}>{e.w.toFixed(1)} kg</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </>
+  );
+}
+
+function Settings({ meals, saveMeals, targets, saveTargets, proteinFloor, saveFloor, band, saveBand, log }) {
+  const [openMeal, setOpenMeal] = useState(null);
+  const [addForMeal, setAddForMeal] = useState(null);
+  const [draft, setDraft] = useState({ name: "", kcal: "", protein: "", carb: false });
+  const [editId, setEditId] = useState(null);
+  const [editDraft, setEditDraft] = useState({ kcal: "", protein: "" });
+  const [exported, setExported] = useState(false);
+  const editTarget = (k, kcal) => saveTargets({ ...targets, [k]: { ...targets[k], kcal: parseInt(kcal) || 0 } });
+
+  const exportAndEmail = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      meals, targets, proteinFloor, band, log,
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const stamp = todayKey();
+    const filename = `tracker-backup-${stamp}.json`;
+
+    // 1. Trigger a download of the full data file
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    // 2. Open the default mail client, pre-filled — the file just downloaded
+    //    and needs to be attached manually (browsers can't attach files
+    //    to a mailto: link for security reasons).
+    const to = "rasmusviby@gmail.com";
+    const subject = encodeURIComponent(`Tracker backup — ${stamp}`);
+    const body = encodeURIComponent(
+      `Backup generated ${new Date().toLocaleString()}.\n\n` +
+      `The file "${filename}" was just downloaded to your Downloads folder.\n` +
+      `Attach it to this email before sending.\n\n` +
+      `(Days logged: ${Object.keys(log || {}).length})`
+    );
+    window.location.href = `mailto:${to}?subject=${subject}&body=${body}`;
+
+    setExported(true);
+    setTimeout(() => setExported(false), 4000);
+  };
+
+  const submitAdd = (meal) => {
+    const name = draft.name.trim();
+    if (!name) return;
+    saveMeals({ ...meals, [meal]: [...(meals[meal] || []),
+      { id: mkId(name), name, kcal: parseInt(draft.kcal) || 0,
+        protein: parseInt(draft.protein) || 0, carb: !!draft.carb, uses: 0 }] });
+    setDraft({ name: "", kcal: "", protein: "", carb: false });
+    setAddForMeal(null);
+  };
+  const startEdit = (food) => { setEditId(food.id); setEditDraft({ kcal: String(food.kcal), protein: String(food.protein) }); };
+  const submitEdit = (meal, id) => {
+    saveMeals({ ...meals, [meal]: meals[meal].map((f) => f.id === id
+      ? { ...f, kcal: parseInt(editDraft.kcal) || f.kcal, protein: parseInt(editDraft.protein) || f.protein } : f) });
+    setEditId(null);
+  };
+  const delFood = (meal, id) => saveMeals({ ...meals, [meal]: meals[meal].filter((f) => f.id !== id) });
+  const pinFood = (meal, id) =>
+    saveMeals({ ...meals, [meal]: meals[meal].map((f) => f.id === id ? { ...f, uses: 9999 } : f) });
+
+  return (
+    <>
+      <Card>
+        <Label>Calorie targets by day type</Label>
+        {Object.entries(targets).map(([k, v]) => (
+          <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+            <span style={{ flex: 1, fontSize: 14 }}>{v.label}</span>
+            <input type="number" value={v.kcal} onChange={(e) => editTarget(k, e.target.value)} style={inputStyle} />
+            <span style={{ color: C.dim, fontSize: 12 }}>kcal</span>
+          </div>
+        ))}
+      </Card>
+
+      <Card>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ flex: 1, fontSize: 14 }}>Protein floor</span>
+          <input type="number" value={proteinFloor} onChange={(e) => saveFloor(parseInt(e.target.value) || 0)} style={inputStyle} />
+          <span style={{ color: C.dim, fontSize: 12 }}>g</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+          <span style={{ flex: 1, fontSize: 14 }}>Weight band</span>
+          <input type="number" step="0.1" value={band.low}
+            onChange={(e) => saveBand({ ...band, low: parseFloat(e.target.value) || 0 })} style={inputStyle} />
+          <span style={{ color: C.dim }}>–</span>
+          <input type="number" step="0.1" value={band.high}
+            onChange={(e) => saveBand({ ...band, high: parseFloat(e.target.value) || 0 })} style={inputStyle} />
+        </div>
+      </Card>
+
+      <Card>
+        <Label>Meal foods · full list</Label>
+        <div style={{ fontSize: 11, color: C.dim, marginTop: 4 }}>
+          Only the ~{VISIBLE_CAP} most-used show in each cloud. "Pin" forces one back to the top.
+        </div>
+        {MEAL_ORDER.map((meal) => {
+          const sorted = [...(meals[meal] || [])].sort((a, b) => (b.uses || 0) - (a.uses || 0));
+          return (
+            <div key={meal} style={{ marginTop: 8 }}>
+              <button onClick={() => setOpenMeal(openMeal === meal ? null : meal)}
+                style={{ width: "100%", textAlign: "left", background: "transparent", border: "none",
+                  color: C.text, fontSize: 14, fontWeight: 600, cursor: "pointer",
+                  padding: "8px 0", borderBottom: `1px solid ${C.line}` }}>
+                {openMeal === meal ? "▾" : "▸"} {MEAL_LABEL[meal]} ({sorted.length})
+              </button>
+              {openMeal === meal && (
+                <div style={{ padding: "8px 0" }}>
+                  {sorted.map((f, idx) => (
+                    <div key={f.id} style={{ padding: "4px 0", opacity: idx >= VISIBLE_CAP ? 0.55 : 1 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ flex: 1, fontSize: 13 }}>
+                          {f.name} {f.carb && <span style={{ color: C.accent }}>◆</span>}
+                          <span style={{ color: C.dim }}> · {f.kcal}k · {f.protein}p · {f.uses || 0}×</span>
+                          {idx >= VISIBLE_CAP && <span style={{ color: C.amber, fontSize: 10 }}> hidden</span>}
+                        </span>
+                        <button onClick={() => pinFood(meal, f.id)} style={smallBtn}>pin</button>
+                        <button onClick={() => editId === f.id ? setEditId(null) : startEdit(f)} style={smallBtn}>edit</button>
+                        <button onClick={() => delFood(meal, f.id)} style={{ ...smallBtn, color: C.red }}>✕</button>
+                      </div>
+                      {editId === f.id && (
+                        <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center" }}>
+                          <input value={editDraft.kcal} inputMode="numeric" placeholder="kcal"
+                            onChange={(e) => setEditDraft({ ...editDraft, kcal: e.target.value })}
+                            style={{ ...inputStyle, width: 70 }} />
+                          <input value={editDraft.protein} inputMode="numeric" placeholder="protein"
+                            onChange={(e) => setEditDraft({ ...editDraft, protein: e.target.value })}
+                            style={{ ...inputStyle, width: 70 }} />
+                          <button onClick={() => submitEdit(meal, f.id)}
+                            style={{ ...smallBtn, color: C.accent, borderColor: C.accent }}>save</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  {addForMeal === meal ? (
+                    <div style={{ marginTop: 10, padding: 12, background: C.panel2,
+                      borderRadius: 12, border: `1px solid ${C.line}` }}>
+                      <input autoFocus value={draft.name}
+                        onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                        placeholder="Food name + portion"
+                        style={{ width: "100%", boxSizing: "border-box", background: C.panel,
+                          border: `1px solid ${C.line}`, borderRadius: 8, color: C.text,
+                          padding: "8px 10px", fontSize: 14 }} />
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <input value={draft.kcal} inputMode="numeric" placeholder="kcal"
+                          onChange={(e) => setDraft({ ...draft, kcal: e.target.value })}
+                          style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: C.panel,
+                            border: `1px solid ${C.line}`, borderRadius: 8, color: C.text, padding: "8px 10px", fontSize: 14 }} />
+                        <input value={draft.protein} inputMode="numeric" placeholder="protein g"
+                          onChange={(e) => setDraft({ ...draft, protein: e.target.value })}
+                          style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: C.panel,
+                            border: `1px solid ${C.line}`, borderRadius: 8, color: C.text, padding: "8px 10px", fontSize: 14 }} />
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                        <button onClick={() => setDraft({ ...draft, carb: !draft.carb })}
+                          style={{ padding: "6px 12px", borderRadius: 8, cursor: "pointer",
+                            border: `1px solid ${draft.carb ? C.accent : C.line}`,
+                            background: draft.carb ? "rgba(56,217,200,0.14)" : "transparent",
+                            color: draft.carb ? C.accent : C.dim, fontSize: 12, fontWeight: 600 }}>
+                          {draft.carb ? "◆ carb source" : "not a carb"}
+                        </button>
+                        <button onClick={() => setAddForMeal(null)}
+                          style={{ ...smallBtn, marginLeft: "auto" }}>cancel</button>
+                        <button onClick={() => submitAdd(meal)} disabled={!draft.name.trim()}
+                          style={{ padding: "8px 16px", borderRadius: 8, border: "none",
+                            background: C.accent, color: C.bg, fontSize: 13, fontWeight: 700,
+                            cursor: draft.name.trim() ? "pointer" : "default",
+                            opacity: draft.name.trim() ? 1 : 0.5 }}>Add</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={() => { setAddForMeal(meal); setDraft({ name: "", kcal: "", protein: "", carb: false }); }}
+                      style={{ marginTop: 8, background: "rgba(56,217,200,0.12)", color: C.accent,
+                        border: `1px solid ${C.accent}`, borderRadius: 8, padding: "8px 12px",
+                        fontSize: 13, fontWeight: 600, cursor: "pointer", width: "100%" }}>
+                      + Add food to {MEAL_LABEL[meal]}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </Card>
+      <Card>
+        <Label>Backup</Label>
+        <div style={{ fontSize: 12, color: C.dim, marginTop: 6 }}>
+          Downloads a full data file, then opens your mail app pre-addressed to{" "}
+          <span style={{ color: C.text }}>rasmusviby@gmail.com</span> — attach the
+          downloaded file before sending.
+        </div>
+        <button onClick={exportAndEmail}
+          style={{ marginTop: 10, width: "100%", padding: "10px 12px", borderRadius: 10,
+            border: `1px solid ${C.accent}`, background: "rgba(56,217,200,0.12)",
+            color: C.accent, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          {exported ? "Downloaded — check your mail app" : "Download backup & email me"}
+        </button>
+      </Card>
+
+      <div style={{ fontSize: 11, color: C.dim, textAlign: "center", padding: "8px 0 0" }}>
+        Data is saved in this browser only (localStorage). Different browser or device = different data.
+      </div>
+    </>
+  );
+}
+
+const inputStyle = { width: 70, background: C.panel2, border: `1px solid ${C.line}`,
+  borderRadius: 8, color: C.text, padding: "6px 8px", fontSize: 14, textAlign: "right" };
+const smallBtn = { background: "transparent", border: `1px solid ${C.line}`, borderRadius: 6,
+  color: C.dim, fontSize: 11, padding: "3px 8px", cursor: "pointer" };
+const stepBtn = { width: 30, background: "rgba(229,100,125,0.15)", border: "none",
+  borderRight: `1px solid ${C.line}`, color: C.red, fontSize: 18, fontWeight: 700, cursor: "pointer" };
+
+function Card({ children }) {
+  return <div style={{ background: C.panel, border: `1px solid ${C.line}`,
+    borderRadius: 16, padding: 16, marginTop: 12 }}>{children}</div>;
+}
+function Label({ children, style }) {
+  return <div style={{ fontSize: 11, letterSpacing: 1, textTransform: "uppercase",
+    color: C.dim, fontWeight: 600, ...(style || {}) }}>{children}</div>;
+}
+function Bar({ value, max, color }) {
+  const pct = Math.min(100, max ? (value / max) * 100 : 0);
+  return <div style={{ height: 6, background: C.panel2, borderRadius: 3, marginTop: 6, overflow: "hidden" }}>
+    <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 3 }} />
+  </div>;
+}
+function MiniInput({ label, value, onChange, placeholder, text }) {
+  return (
+    <div style={{ flex: 1 }}>
+      <Label>{label}</Label>
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        inputMode={text ? "text" : "decimal"}
+        style={{ width: "100%", boxSizing: "border-box", marginTop: 4, background: C.panel2,
+          border: `1px solid ${C.line}`, borderRadius: 8, color: C.text, padding: "8px 10px", fontSize: 14 }} />
+    </div>
+  );
+}
+function TabBar({ tab, setTab }) {
+  const tabs = [["today", "Today"], ["trend", "Trend"], ["settings", "Settings"]];
+  return (
+    <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)",
+      width: "100%", maxWidth: 480, display: "flex", background: C.panel, borderTop: `1px solid ${C.line}` }}>
+      {tabs.map(([k, l]) => (
+        <button key={k} onClick={() => setTab(k)}
+          style={{ flex: 1, padding: "14px 0", background: "transparent", border: "none", cursor: "pointer",
+            color: tab === k ? C.accent : C.dim, fontSize: 12, fontWeight: 700, letterSpacing: 0.5 }}>
+          {l}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
